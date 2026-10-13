@@ -1,17 +1,15 @@
-#include "freertos/FreeRTOS.h"
-#include "freertos/idf_additions.h"
-#include "freertos/projdefs.h"
-#include "freertos/task.h"
-#include "driver/ledc.h"
-#include "hal/ledc_types.h"
-#include "portmacro.h"
-#include "sdkconfig.h"
-#include "soc/clk_tree_defs.h"
-#include <ctype.h>
+//#include <bits/pthreadtypes.h>
 #include <stdint.h>
-#include <esp_log.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
+#include <pthread.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "driver/ledc.h"
+#include "esp_log.h"
 
 
 #define LEDC_TIMER LEDC_TIMER_0
@@ -24,6 +22,8 @@
 #define GPIO_GREEN 27
 
 static const char *TAG  = "mood_lamp" ;
+int16_t delay = 10 ;
+pthread_mutex_t mtx ;
 
 typedef enum {
     MODE_OFF,
@@ -32,10 +32,25 @@ typedef enum {
     MODE_BLUE,
     MODE_RAINBOW,
     MODE_PULSE,
-    MODE_BREATH
+    MODE_BREATHE
 } led_mode_t ;
 
+
 static QueueHandle_t mode_queue ;
+
+
+void modifydelay( int8_t value )
+{
+            pthread_mutex_lock( &mtx );
+            if( delay + value >= 32766 )
+                delay = 32766;
+            else if( delay + value <= 0 )
+                delay = 0 ;
+            else
+                delay += (value);
+            pthread_mutex_unlock( &mtx );
+}
+
 
 void ledc_conftimer(void)
 {
@@ -51,8 +66,8 @@ void ledc_conftimer(void)
 
 };
 
-void ledc_assignchannel( int * gpios ){
-    for ( int ch = 0 ; ch < (int)sizeof(gpios)/(int)sizeof(gpios[0]) ; ch++ )
+void ledc_assignchannel( int * gpios , size_t  length ){
+    for ( int ch = 0 ; ch < length ; ch++ )
     {
         ledc_channel_config_t ch_conf={
             .speed_mode = LEDC_MODE,
@@ -81,7 +96,7 @@ void set_rgb( uint8_t r , uint8_t g , uint8_t b )
 }
 
 void hsv_to_rgb( uint16_t h , uint8_t s , uint8_t v,  //( Hue, Saturation, Value )
-                uint8_t *r , uint8_t *b , uint8_t *g )
+uint8_t *r , uint8_t *b , uint8_t *g )
 {
     if( s==0 )
     {
@@ -113,19 +128,21 @@ static void animation_task( void *pvParameters )
     uint16_t hue = 0 ;
     uint8_t pulse_brightness = 0 ;
     int8_t pulse_direction = 1 ;
+    uint8_t breathelight = 0 ;
+    int8_t hale = 1 ;
 
     ESP_LOGI( TAG , "Animation task running on core %d",
-             xPortGetCoreID());
+              xPortGetCoreID());
     while(1)
     {
         led_mode_t new_mode ;
         if( xQueueReceive( mode_queue , &new_mode ,0 ) == pdTRUE )
         {
-                current_mode = new_mode ;
-                hue = 0 ;
-                pulse_brightness = 0 ;
-                pulse_direction = 1;
-                ESP_LOGI( TAG ,"Mode changed to %d",current_mode );
+            current_mode = new_mode ;
+            hue = 0 ;
+            pulse_brightness = 0 ;
+            pulse_direction = 1;
+            ESP_LOGI( TAG ,"Mode changed to %d",current_mode );
         }
 
         uint8_t r = 0, g = 0, b = 0 ;
@@ -134,50 +151,64 @@ static void animation_task( void *pvParameters )
         {
             case MODE_OFF :
                 set_rgb( 0, 0 ,0 );
-                vTaskDelay( pdMS_TO_TICKS(100) );
+                vTaskDelay( pdMS_TO_TICKS(delay+90) );
                 continue ;
 
             case MODE_RED:
                 set_rgb( 255, 0, 0 );
-                vTaskDelay(pdMS_TO_TICKS(100));
+                vTaskDelay(pdMS_TO_TICKS(delay+90));
                 continue;
 
             case MODE_GREEN :
                 set_rgb( 0, 255, 0 );
-                vTaskDelay( pdMS_TO_TICKS(100) );
+                vTaskDelay( pdMS_TO_TICKS(delay+90) );
                 continue;
 
             case MODE_BLUE :
                 set_rgb( 0, 0, 255 );
-                vTaskDelay( pdMS_TO_TICKS(100) );
+                vTaskDelay( pdMS_TO_TICKS(delay+90) );
                 continue;
 
             case MODE_RAINBOW :
                 hsv_to_rgb(hue, 255, 200, &r, &g, &b);
                 set_rgb(r, g, b);
                 hue = (hue + 1) % 360;
-                vTaskDelay( pdMS_TO_TICKS(20) );  /* ~18 seconds per full cycle */
+                vTaskDelay( pdMS_TO_TICKS(delay+10) );  /* ~18 seconds per full cycle */
                 continue;
 
             case MODE_PULSE : {
                 hsv_to_rgb(hue, 255, pulse_brightness, &r, &g, &b);
                 set_rgb(r, g, b);
-                int new_val = pulse_brightness + pulse_direction * 2;
-                if (new_val >= 255) { new_val = 255; pulse_direction = -1; }
-                if (new_val <= 0) {
-                    new_val = 0;
-                    pulse_direction = 1;
-                    hue = (hue + 30) % 360;  /* Shift color each pulse */
+                int new_val = pulse_brightness + pulse_direction * 2 ;
+                if ( new_val >= 255 ) { new_val = 255; pulse_direction = -1; }
+                if ( new_val <= 0 ) {
+                    new_val = 0 ;
+                    pulse_direction = 1 ;
+                    hue = (hue + 30) % 360 ;  /* Shift color each pulse */
                 }
 
-            case MODE_BREATH : {
-                hsv_to_rgb(  hue ,  , );
+                pulse_brightness = ( uint8_t) new_val ;
+                vTaskDelay( pdMS_TO_TICKS(delay) );
+                continue;
 
+            }
+
+            case MODE_BREATHE : {
+                hsv_to_rgb(  10 , 0 , breathelight ,&r ,&g , &b );
+                set_rgb( 0 ,  g , 0 ) ;
+                int newvalue = breathelight + (10 * hale )  ;
+                if( newvalue >= 255 && hale==1 ){
+                    newvalue -= 10 ;
+                    hale = -1 ;
+                    vTaskDelay( pdMS_TO_TICKS(delay) );
+                }else if( hale==-1 &&  newvalue-10<=0){
+                    newvalue +=10 ;
+                    hale =1 ;
                 }
 
-            pulse_brightness = ( uint8_t) new_val ;
-            vTaskDelay( pdMS_TO_TICKS(10) );
-            continue;
+                breathelight = ( uint8_t ) newvalue ;
+                vTaskDelay( pdMS_TO_TICKS( delay+30 ) );
+                continue ;
             }
         }
     }
@@ -197,7 +228,7 @@ static void parser_task( void *pvParameters )
     char line[64];
 
     ESP_LOGI( TAG , "Parser task running on core %d",xPortGetCoreID()) ;
-    printf( "\nRGB Modd Lamp ready . Commands red, green , blue ,rainbow,pulse ,off\n>");
+    printf( "\nRGB Modd Lamp ready . Commands red, green , blue ,rainbow,pulse ,off ,breathe, slower,faster\n>");
     fflush( stdout );
     // blue  red green off pulse
 
@@ -211,29 +242,36 @@ static void parser_task( void *pvParameters )
             led_mode_t mode ;
             bool valid = true ;
 
-            if (strcmp(line, "red") == 0) {
+            if ( strcmp(line, "red") == 0) {
                 mode = MODE_RED;
-            } else if (strcmp(line, "green") == 0) {
+            } else if ( strcmp(line, "green" ) == 0) {
                 mode = MODE_GREEN;
-            } else if (strcmp(line, "blue") == 0) {
+            } else if ( strcmp(line, "blue" ) == 0) {
                 mode = MODE_BLUE;
-            } else if (strcmp(line, "rainbow") == 0) {
+            } else if ( strcmp(line, "rainbow" ) == 0) {
                 mode = MODE_RAINBOW;
-            } else if (strcmp(line, "pulse") == 0) {
+            } else if ( strcmp(line, "pulse" ) == 0) {
                 mode = MODE_PULSE;
-            } else if (strcmp(line, "off") == 0) {
+            } else if ( strcmp(line, "off" ) == 0) {
                 mode = MODE_OFF;
-            }else if( strcmp( line , "breatg" ) == 0 ){
-                mode = MODE_BREATH ;
-            } else {
+            }else if( strcmp( line , "breathe" ) == 0 ){
+                mode = MODE_BREATHE ;
+            }else if( strcmp( line , "faster" ) == 0 ){
+                modifydelay( -5 );
+                printf( "delay modifyed to %d\n",delay );
+
+            }else if( strcmp( line,"slower" ) == 0 ){
+                    modifydelay( +5 ) ;
+                    printf( "delay modifed to %d\n",delay );
+            }else {
                 valid = false;
                 printf("Unknown command: '%s'\n", line);
-                printf("Commands: red, green, blue, rainbow, pulse, off\n");
+                printf("Commands: red, green, blue, rainbow, pulse, off , breathe,slower,faster \n");
             }
 
             if(valid)
             {
-                xQueueSend(mode_queue , &mode , pdMS_TO_TICKS(100));
+                xQueueSend(mode_queue , &mode , pdMS_TO_TICKS(delay+90));
                 printf( "OK: %s\n" , line) ;
             }
             printf( "> " );
@@ -246,12 +284,12 @@ static void parser_task( void *pvParameters )
 }
 
 /*
-void my_task( void *pvParameters )
-{
-    while(1){
-        vTaskDelay(pdMS_TO_TICKS(100) );
-    }
-}*/
+ * void my_task( void *pvParameters )
+ * {
+ *    while(1){
+ *        vTaskDelay(pdMS_TO_TICKS(100) );
+ *    }
+ * }*/
 
 
 void app_main( void )
@@ -260,7 +298,7 @@ void app_main( void )
 
     ledc_conftimer();
     int gpios[] = {GPIO_RED , GPIO_GREEN , GPIO_BLUE } ;
-    ledc_assignchannel(  gpios ) ;
+    ledc_assignchannel(  gpios , sizeof(gpios)/sizeof( gpios[0]) ) ;
     set_rgb( 0, 0 , 0 );
 
     mode_queue = xQueueCreate( 4 , sizeof( led_mode_t ) );
@@ -275,15 +313,15 @@ void app_main( void )
         1) ;
 
 
-    xTaskCreatePinnedToCore(
-        parser_task,
-        "parser",
-        4096,
-        NULL,
-        5,
-        NULL,
-        0   //Core ID : 0 = pro_cpu , 1 = APP_CPU tskNO_AFFINITY for default handlig by scheduler
-    );
+        xTaskCreatePinnedToCore(
+            parser_task,
+            "parser",
+            4096,
+            NULL,
+            5,
+            NULL,
+            0   //Core ID : 0 = pro_cpu , 1 = APP_CPU tskNO_AFFINITY for default handlig by scheduler
+        );
 
 }
 
