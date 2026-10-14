@@ -5,11 +5,14 @@
 #include <ctype.h>
 #include <pthread.h>
 
+#include "esp_log_level.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "driver/ledc.h"
 #include "esp_log.h"
+#include "portmacro.h"
 
 
 #define LEDC_TIMER LEDC_TIMER_0
@@ -65,6 +68,13 @@ void ledc_conftimer(void)
     ledc_timer_config( &timer_conf );
 
 };
+
+void getstatus(void)
+{
+    ESP_LOGI( TAG,"free heapsize: %d\nnumber of tasks: %d\n ",(int)esp_get_free_heap_size(),(int)uxTaskGetNumberOfTasks() );
+    //printf( TAG,"free heapsize: %d\nnumber of tasks: %d\n ",(int)esp_get_free_heap_size(),(int)uxTaskGetNumberOfTasks() ) ;
+
+}
 
 void ledc_assignchannel( int * gpios , size_t  length ){
     for ( int ch = 0 ; ch < length ; ch++ )
@@ -142,7 +152,10 @@ static void animation_task( void *pvParameters )
             hue = 0 ;
             pulse_brightness = 0 ;
             pulse_direction = 1;
-            ESP_LOGI( TAG ,"Mode changed to %d",current_mode );
+
+            ESP_LOGI( TAG ,"Mode changed to %d\tcore %d\n  tickcount : %d ",current_mode , (int)xPortGetCoreID() ,
+                      (int)xTaskGetTickCount() );
+            //ESP_LOGI( TAG ,"Mode changed to %d\t",current_mode );
         }
 
         uint8_t r = 0, g = 0, b = 0 ;
@@ -228,7 +241,7 @@ static void parser_task( void *pvParameters )
     char line[64];
 
     ESP_LOGI( TAG , "Parser task running on core %d",xPortGetCoreID()) ;
-    printf( "\nRGB Modd Lamp ready . Commands red, green , blue ,rainbow,pulse ,off ,breathe, slower,faster\n>");
+    printf( "\nRGB Modd Lamp ready . Commands red, green , blue ,rainbow,pulse ,off ,status ,breathe, slower,faster\n>");
     fflush( stdout );
     // blue  red green off pulse
 
@@ -256,6 +269,9 @@ static void parser_task( void *pvParameters )
                 mode = MODE_OFF;
             }else if( strcmp( line , "breathe" ) == 0 ){
                 mode = MODE_BREATHE ;
+            }else if( strcmp( line,"status" ) == 0 ){
+                getstatus() ;
+
             }else if( strcmp( line , "faster" ) == 0 ){
                 modifydelay( -5 );
                 printf( "delay modifyed to %d\n",delay );
@@ -266,7 +282,7 @@ static void parser_task( void *pvParameters )
             }else {
                 valid = false;
                 printf("Unknown command: '%s'\n", line);
-                printf("Commands: red, green, blue, rainbow, pulse, off , breathe,slower,faster \n");
+                printf("Commands: red, green, blue, rainbow, pulse, off ,status , breathe,slower,faster \n");
             }
 
             if(valid)
